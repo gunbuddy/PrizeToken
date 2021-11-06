@@ -18,11 +18,16 @@ interface IBEP20 {
     event Approval(address indexed owner, address indexed spender, uint256 value);
 }
 
-abstract contract Owned {
+abstract contract Ownable {
     address internal owner;
+    address private _previousOwner;
+    uint256 private _lockTime;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     constructor(address _owner) {
         owner = _owner;
+        emit OwnershipTransferred(address(0), _owner);
     }
 
     modifier onlyOwner() {
@@ -35,12 +40,30 @@ abstract contract Owned {
     }
 
 
-    function transferOwnership(address payable adr) public onlyOwner {
-        owner = adr;
-        emit OwnershipTransferred(adr);
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
     }
 
-    event OwnershipTransferred(address owner);
+    function geUnlockTime() public view returns (uint256) {
+        return _lockTime;
+    }
+
+    function lock(uint256 time) public virtual onlyOwner {
+        _previousOwner = owner;
+        owner = address(0);
+        _lockTime = block.timestamp + time;
+        emit OwnershipTransferred(owner, address(0));
+    }
+
+    function unlock() public virtual {
+        require(_previousOwner == msg.sender, "You don't have permission to unlock");
+        require(block.timestamp > _lockTime , "Contract is locked until 7 days");
+        emit OwnershipTransferred(owner, _previousOwner);
+        owner = _previousOwner;
+    }
+
 }
 
 interface IDEXFactory {
@@ -96,7 +119,7 @@ interface IDEXRouter {
 }
 
 
-contract BscDevContract is IBEP20, Owned {
+contract BscDevContract is IBEP20, Ownable {
 
     address WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
     address DEAD = 0x000000000000000000000000000000000000dEaD;
@@ -105,6 +128,7 @@ contract BscDevContract is IBEP20, Owned {
     address public autoLiquidityReceiver = DEAD;
     address public marketingFeeReceiver = msg.sender; // TO DO
     address public devFeeReceiver = msg.sender; // TO DO
+    address public teamWallet = msg.sender; // TO DO
     
     mapping (address => uint256) _balances;
     mapping (address => mapping (address => uint256)) _allowances;
@@ -138,15 +162,18 @@ contract BscDevContract is IBEP20, Owned {
     bool public claimedPrize;
     bool inSwap;
     modifier swapping() { inSwap = true; _; inSwap = false; }
+    modifier onlyTeam() {
+        require(msg.sender == teamWallet); _;
+    }
 
     uint256 public maxTxAmount = _totalSupply / 100 * 2;
     uint256 public maxWalletToken = _totalSupply / 100 * 3;
   
-    constructor () Owned(msg.sender) {
+    constructor () Ownable(msg.sender) {
         router = IDEXRouter(0x10ED43C718714eb63d5aA57B78B54704E256024E);
         pair = IDEXFactory(router.factory()).createPair(WBNB, address(this));
         _allowances[address(this)][address(router)] = type(uint256).max;
-        
+
         isFeeExempt[msg.sender] = true;
         isTxLimitExempt[msg.sender] = true;
 
@@ -282,7 +309,7 @@ contract BscDevContract is IBEP20, Owned {
         uint256 amountBNBLiquidity = amountBNB * liquidityFee / totalBNBFee/2;
         uint256 amountBNBPrize = amountBNB * prizeFee / totalBNBFee;
         uint256 amountBNBMarketing = amountBNB * marketingFee / totalBNBFee;
-        uint256 amountBNBDev = amountBNB * devFee / totalBNBFee;
+        uint256 amountBNBDev = amountBNB - (amountBNBMarketing + amountBNBPrize + amountBNBLiquidity);
 
         (bool marketingSuccess,) = payable(marketingFeeReceiver).call{value: amountBNBMarketing, gas: 30000}("");
         require(marketingSuccess, "receiver rejected ETH transfer");
@@ -320,16 +347,19 @@ contract BscDevContract is IBEP20, Owned {
     
     function setIsFeeExempt(address holder, bool exempt) external onlyOwner {
         isFeeExempt[holder] = exempt;
+        emit SetIsFeeExempt(holder, exempt);
     }
     
     function setIsTxLimitExempt(address holder, bool exempt) external onlyOwner {
         isTxLimitExempt[holder] = exempt;
+        emit SetIsTxLimitExempt(holder, exempt);
     }
     
     function setPresaleAddress(address holder) external onlyOwner {
         canAddLiquidity[holder] = true;
         isFeeExempt[holder] = true;
         isTxLimitExempt[holder] = true;
+        emit SetPresaleAddress(holder);
     }
 
     function setFees(uint256 _liquidityFee, uint256 _prizeFee, uint256 _marketingFee, uint256 _devFee) external onlyOwner {
@@ -339,36 +369,43 @@ contract BscDevContract is IBEP20, Owned {
         devFee = _devFee;
         totalFee = _liquidityFee + _prizeFee + _marketingFee + _devFee;
         require(totalFee <= 33);
+        emit SetFees(_liquidityFee, _prizeFee, _marketingFee, _devFee);
     }
 
-    function setPrizeToken(address _newPrize) external onlyOwner {
+    function setPrizeToken(address _newPrize) external onlyTeam {
         require(_newPrize != address(this) && !claimedPrize);
         PRIZE = _newPrize;
         claimedPrize = false;
+        emit SetPrizeToken(PRIZE);
     }
     
     function setSwapBack(bool _enabled) external onlyOwner {
         swapEnabled = _enabled;
+        emit SetSwapBackEnabled(_enabled);
     }
 
     function setSwapBackSettings(uint256 _min_base10000, uint256 _max_base10000) external onlyOwner {
         require(_min_base10000 >= 1 && _max_base10000 >= 1, "Can't set the SwapBack below 1");
         swapThresholdMax = _totalSupply / 10000 * _max_base10000;
         swapThreshold = _totalSupply / 10000 * _min_base10000;
+        emit SetSwapBackSettings(swapThresholdMax, swapThreshold);
     }
     
     function setMaxWalletPercent_base1000(uint256 maxWallPercent_base100) external onlyOwner() {
         require (maxWallPercent_base100 >= _totalSupply/100, "Can't set MaxWallet below 1%");
         maxWalletToken = _totalSupply /100 * maxWallPercent_base100;
+        emit SetMaxWallet(maxWalletToken);
     }
 
     function setMaxTxPercent_base1000(uint256 maxTXPercentage_base1000) external onlyOwner() {
         require (maxTXPercentage_base1000 >= _totalSupply/1000, "Can't set MaxTx below 0,1%");
         maxTxAmount = _totalSupply /1000 * maxTXPercentage_base1000;
+        emit SetMaxTx(maxTxAmount);
     }
     
-    function EnablePrize() external onlyOwner {
+    function EnablePrize() external onlyTeam {
         canClaimPrize = true;
+        emit EnabledPrize(true);
     }
     
     function ClaimPrize() external{
@@ -379,9 +416,10 @@ contract BscDevContract is IBEP20, Owned {
         IBEP20(PRIZE).transfer(msg.sender, Prize);
         canClaimPrize = false;
         claimedPrize = true;
+        emit ClaimedPrize(true);
     }
 
-    function rescueToken(address tokenAddress) public onlyOwner returns (bool success) {
+    function rescueToken(address tokenAddress) external onlyOwner returns (bool success) {
         uint256 Token = IBEP20(tokenAddress).balanceOf(address(this));
         require (tokenAddress != address(this) &&
                  tokenAddress != PRIZE, "Can't let you take the prize or the native token");
@@ -419,4 +457,15 @@ contract BscDevContract is IBEP20, Owned {
 
 event AutoLiquify(uint256 amountBNB, uint256 amountTokens);
 event SwapBNBForPRIZE(uint256 amountIn, address[] path);
+event SetPrizeToken(address indexed token);
+event SetSwapBackSettings(uint256 swapThresholdMax, uint256 swapThreshold);
+event SetSwapBackEnabled(bool enabled);
+event SetFees(uint256 liquidityFee, uint256 prizeFee, uint256 marketingFee, uint256 devFee);
+event SetIsFeeExempt(address holder, bool enabled);
+event SetIsTxLimitExempt(address holder, bool enabled);
+event SetPresaleAddress(address holder);
+event SetMaxWallet(uint256 maxWalletToken);
+event SetMaxTx(uint256 maxTxAmount);
+event EnabledPrize(bool enabled);
+event ClaimedPrize(bool enabled);
 }
